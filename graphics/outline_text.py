@@ -4,6 +4,30 @@ import pygame
 class OutlineText:
     _circle_cache: dict[int, list[tuple[int, int]]] = {}
 
+    screen: pygame.Surface
+    position: tuple[int, int]
+    text: str
+    font: pygame.font.Font
+    text_color: pygame.Color
+    outline_color: pygame.Color
+    outline_width: int
+
+    def __init__(
+        self,
+        position: tuple[int, int],
+        text: str,
+        font: pygame.font.Font,
+        text_color: pygame.Color = pygame.Color("black"),
+        outline_color: pygame.Color = pygame.Color(255, 255, 255),
+        outline_width: int = 2,
+    ) -> None:
+        self.position = position
+        self.text = text
+        self.font = font
+        self.text_color = text_color
+        self.outline_color = outline_color
+        self.outline_width = outline_width
+
     @classmethod
     def _circlepoints(cls, radius: float):
         radius = int(round(radius))
@@ -26,27 +50,63 @@ class OutlineText:
         return points
 
     @classmethod
-    def render(
+    def get_surface(
         cls,
         text: str,
         font: pygame.font.Font,
-        gfcolor: pygame.Color = pygame.Color("black"),
-        ocolor: pygame.Color = pygame.Color(255, 255, 255),
-        opx: int = 2,
+        text_color: pygame.Color = pygame.Color("black"),
+        outline_color: pygame.Color = pygame.Color(255, 255, 255),
+        outline_width: int = 2,
     ) -> pygame.Surface:
-        textsurface = font.render(text, True, gfcolor).convert_alpha()
-        w = textsurface.get_width() + 2 * opx
+        textsurface = font.render(text, True, text_color).convert_alpha()
+        w = textsurface.get_width() + 2 * outline_width
         h = font.get_height()
 
-        osurf = pygame.Surface((w, h + 2 * opx)).convert_alpha()
+        osurf = pygame.Surface((w, h + 2 * outline_width)).convert_alpha()
         osurf.fill((0, 0, 0, 0))
 
         surf = osurf.copy()
 
-        osurf.blit(font.render(text, True, ocolor).convert_alpha(), (0, 0))
+        osurf.blit(font.render(text, True, outline_color).convert_alpha(), (0, 0))
 
-        for dx, dy in cls._circlepoints(opx):
-            surf.blit(osurf, (dx + opx, dy + opx))
+        for dx, dy in cls._circlepoints(outline_width):
+            surf.blit(osurf, (dx + outline_width, dy + outline_width))
 
-        surf.blit(textsurface, (opx, opx))
+        surf.blit(textsurface, (outline_width, outline_width))
         return surf
+
+    @classmethod
+    def render(
+        cls,
+        surface: pygame.Surface,
+        position: tuple[int, int],
+        text: str,
+        font: pygame.font.Font,
+        text_color: pygame.Color = pygame.Color("black"),
+        outline_color: pygame.Color = pygame.Color(255, 255, 255),
+        outline_width: int = 2,
+    ):
+        TEXT_SURFACE = cls.get_surface(
+            text=text,
+            font=font,
+            text_color=text_color,
+            outline_color=outline_color,
+            outline_width=outline_width,
+        )
+
+        TEXT_RECT = TEXT_SURFACE.get_rect(center=position)
+
+        surface.blit(TEXT_SURFACE, TEXT_RECT)
+
+        return TEXT_RECT
+
+    def update(self, surface: pygame.Surface):
+        OutlineText.render(
+            surface=surface,
+            text=self.text,
+            text_color=self.text_color,
+            outline_color=self.outline_color,
+            outline_width=self.outline_width,
+            position=self.position,
+            font=self.font,
+        )

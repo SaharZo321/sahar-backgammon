@@ -1,18 +1,19 @@
-import math
 from pygame import Surface
 import pygame
 from pygame.time import Clock
 from backgammon import Backgammon
 from backgammon import BackgammonAI
 import config
+from config import get_font
 from game_manager import GameManager, SettingsKeys
-from graphics.buttons import Button
-from graphics.graphics_manager import ColorConverter, GraphicsManager, get_font
-from menus.menus import OptionsMenu, ReconnectingMenu, UnfocusedMenu, WaitingMenu
+from graphics.elements import ButtonElement
+from graphics.graphics_manager import ColorConverter, GraphicsManager
+from menus.menus import ConnectingMenu, LostConnectionMenu, UnfocusedMenu, WaitingMenu
 from menus.screen import GameScreen, GameScreenButtonKeys
-from models import GameState, Move, MoveType, OnlineGameState, ScoredMoves
+from menus.menus import OptionsMenu
+from models import GameState, Move, MoveType, OnlineGameState, ScoredMoves, ServerFlags
 from models import Player
-from server import BGServer, Network, ServerFlags
+from network import BGServer, NetworkClient
 
 
 class BotGame(GameScreen):
@@ -26,12 +27,19 @@ class BotGame(GameScreen):
         graphics = GraphicsManager(screen=screen)
         ai_got_moves = False
         backgammon = Backgammon()
+        last_turn = Player.other(backgammon.get_current_turn())
 
         last_clicked_index = -1
         bot_player = Player.player2
 
+        def play_dice():
+            nonlocal last_turn
+            if backgammon.get_current_turn() != last_turn:
+                cls._play_dice_sound()
+                last_turn = backgammon.get_current_turn()
+        
         def is_bot_turn() -> bool:
-            return bot_player == backgammon.current_turn
+            return bot_player == backgammon.get_current_turn()
 
         def is_screen_on_top():
             nonlocal options
@@ -61,14 +69,13 @@ class BotGame(GameScreen):
         def done_button_click():
             if backgammon.is_game_over():
                 winner = backgammon.get_winner()
-                print(winner)
-                backgammon.set_winning_score(winner)
                 backgammon.new_game(winner)
                 if is_bot_turn():
                     bot_turn()
                 return
 
             backgammon.switch_turn()
+            
             nonlocal time
             time = pygame.time.get_ticks()
             bot_turn()
@@ -94,7 +101,16 @@ class BotGame(GameScreen):
             graphics=graphics,
         )
 
-        buttons = [buttons_dict[key] for key in buttons_dict]
+        all_buttons = [button for button in buttons_dict.values()]
+
+        game_buttons = [
+            buttons_dict[GameScreenButtonKeys.done],
+            buttons_dict[GameScreenButtonKeys.undo],
+        ]
+        always_on_buttons = [
+            buttons_dict[GameScreenButtonKeys.leave],
+            buttons_dict[GameScreenButtonKeys.options],
+        ]
 
         def on_random_click():
             nonlocal last_clicked_index
@@ -124,10 +140,10 @@ class BotGame(GameScreen):
             screen.fill("black")
             cursor = pygame.SYSTEM_CURSOR_ARROW
             GraphicsManager.render_background(screen=screen)
-
+            play_dice()
             player_colors = {
-                Player.player1: GameManager.get_setting(SettingsKeys.PIECE_COLOR),
-                Player.player2: GameManager.get_setting(SettingsKeys.OPPONENT_COLOR),
+                Player.player1: GameManager.get_setting(SettingsKeys.piece_color),
+                Player.player2: GameManager.get_setting(SettingsKeys.opponent_color),
             }
             graphics.render_board(
                 game_state=backgammon.get_state(),
@@ -139,13 +155,15 @@ class BotGame(GameScreen):
                 time = pygame.time.get_ticks()
                 if len(ai_moves) == 0:
                     ai_got_moves = False
-                    print("bot played")
+                    print("bot played")     
                     if backgammon.is_game_over():
                         done_button_click()
                         continue
                     backgammon.switch_turn()
                 else:
+                    cls._play_piece_sound()
                     move = ai_moves.pop()
+                    print("Handled Move: ", move)
                     backgammon.handle_move(move=move)
 
             if (
@@ -159,32 +177,41 @@ class BotGame(GameScreen):
 
             graphics.highlight_tracks(highlighted_indexes)
 
-            buttons_dict[GameScreenButtonKeys.DONE].toggle(
+            buttons_dict[GameScreenButtonKeys.done].toggle(
                 disabled=not backgammon.is_turn_done() or is_bot_turn()
             )
-            buttons_dict[GameScreenButtonKeys.UNDO].toggle(
+            buttons_dict[GameScreenButtonKeys.undo].toggle(
                 disabled=not backgammon.has_history() or is_bot_turn()
             )
-
+            
             cursor = cls.get_cursor(
                 graphics=graphics,
-                buttons=buttons,
+                buttons=always_on_buttons,
                 backgammon=backgammon,
                 condition=not is_screen_on_top(),
             )
-
-            cls._check_buttons(
-                screen=screen, buttons=buttons, condition=not is_screen_on_top()
+            
+            cursor = cls.get_cursor(
+                graphics=graphics,
+                buttons=game_buttons,
+                backgammon=backgammon,
+                condition=not is_screen_on_top() and is_bot_turn(),
             )
 
-            for event in pygame.event.get():
+            cls._render_elements(
+                screen=screen, elements=all_buttons, condition=not is_screen_on_top()
+            )
+            events = pygame.event.get()
+            for event in events:
                 cls._check_quit(event=event, quit=GameManager.quit)
                 if (
                     event.type == pygame.MOUSEBUTTONDOWN
-                    and not is_bot_turn()
                     and not is_screen_on_top()
                 ):
-                    cls._click_buttons(buttons=buttons)
+                    cls._click_elements(elements=always_on_buttons)
+                    
+                    if not is_bot_turn():
+                        cls._click_elements(elements=game_buttons)
 
                     cls._move_piece(
                         graphics=graphics,
@@ -200,7 +227,7 @@ class BotGame(GameScreen):
             if not GameManager.is_window_focused():
                 UnfocusedMenu.start(screen=screen)
             elif options:
-                OptionsMenu.start(screen=screen, close=close_options)
+                OptionsMenu.start(screen=screen, close=close_options, events=events)
             else:
                 pygame.mouse.set_cursor(cursor)
 
@@ -215,8 +242,15 @@ class OfflineGame(GameScreen):
         options = False
         graphics = GraphicsManager(screen=screen)
         backgammon = Backgammon()
+        last_turn = Player.other(backgammon.get_current_turn())
         last_clicked_index = -1
 
+        def play_dice():
+            nonlocal last_turn
+            if backgammon.get_current_turn() != last_turn:
+                cls._play_dice_sound()
+                last_turn = backgammon.get_current_turn()
+                
         def is_screen_on_top():
             nonlocal options
             return options or not GameManager.is_window_focused()
@@ -237,12 +271,11 @@ class OfflineGame(GameScreen):
             if backgammon.is_game_over():
                 winner = backgammon.get_winner()
                 print(winner)
-                backgammon.set_winning_score(winner)
-                backgammon.new_game()
+                backgammon.new_game(winner)
                 return
 
             backgammon.switch_turn()
-            buttons_dict[GameScreenButtonKeys.DONE].toggle()
+            buttons_dict[GameScreenButtonKeys.done].toggle()
 
         def undo_button_click():
             backgammon.undo()
@@ -259,7 +292,7 @@ class OfflineGame(GameScreen):
             graphics=graphics,
         )
 
-        buttons = [buttons_dict[key] for key in buttons_dict]
+        buttons = [button for button in buttons_dict.values()]
 
         def on_random_click():
             nonlocal last_clicked_index
@@ -288,13 +321,12 @@ class OfflineGame(GameScreen):
             clock.tick(config.FRAMERATE)
             screen.fill("black")
             cursor = pygame.SYSTEM_CURSOR_ARROW
-            MOUSE_POSITION = pygame.mouse.get_pos()
-
+            play_dice()
             GraphicsManager.render_background(screen=screen)
 
             player_colors = {
-                Player.player1: GameManager.get_setting(SettingsKeys.PIECE_COLOR),
-                Player.player2: GameManager.get_setting(SettingsKeys.OPPONENT_COLOR),
+                Player.player1: GameManager.get_setting(SettingsKeys.piece_color),
+                Player.player2: GameManager.get_setting(SettingsKeys.opponent_color),
             }
 
             graphics.render_board(
@@ -315,22 +347,22 @@ class OfflineGame(GameScreen):
                 condition=not is_screen_on_top(),
             )
 
-            buttons_dict[GameScreenButtonKeys.DONE].toggle(
+            buttons_dict[GameScreenButtonKeys.done].toggle(
                 disabled=not backgammon.is_turn_done()
             )
-            buttons_dict[GameScreenButtonKeys.UNDO].toggle(
+            buttons_dict[GameScreenButtonKeys.undo].toggle(
                 disabled=not backgammon.has_history()
             )
 
-            cls._check_buttons(
-                screen=screen, buttons=buttons, condition=not is_screen_on_top()
+            cls._render_elements(
+                screen=screen, elements=buttons, condition=not is_screen_on_top()
             )
-
-            for event in pygame.event.get():
+            events = pygame.event.get()
+            for event in events:
                 cls._check_quit(event=event, quit=GameManager.quit)
                 if event.type == pygame.MOUSEBUTTONDOWN and not is_screen_on_top():
 
-                    cls._click_buttons(buttons=buttons)
+                    cls._click_elements(elements=buttons)
 
                     cls._move_piece(
                         graphics=graphics,
@@ -346,7 +378,7 @@ class OfflineGame(GameScreen):
             if not GameManager.is_window_focused():
                 UnfocusedMenu.start(screen=screen)
             elif options:
-                OptionsMenu.start(screen=screen, close=close_options)
+                OptionsMenu.start(screen=screen, close=close_options, events=events)
             else:
                 pygame.mouse.set_cursor(cursor)
 
@@ -363,43 +395,52 @@ class LocalClientGame(GameScreen):
 
         def is_screen_on_top():
             nonlocal options
-            return options or not GameManager.is_window_focused() or server.local_is_alone()
+            return options or not GameManager.is_window_focused() or not server.connected
 
         server = BGServer(
             port=config.GAME_PORT,
             buffer_size=config.NETWORK_BUFFER,
             local_color=ColorConverter.pygame_to_pydantic(
-                GameManager.get_setting(SettingsKeys.PIECE_COLOR)
+                GameManager.get_setting(SettingsKeys.piece_color)
             ),
             online_color=ColorConverter.pygame_to_pydantic(
-                GameManager.get_setting(SettingsKeys.OPPONENT_COLOR)
+                GameManager.get_setting(SettingsKeys.opponent_color)
             ),
         )
-
+        last_turn = Player.other(server.local_get_game_state().current_turn)
+        
+        def play_dice():
+            nonlocal last_turn
+            turn = server.local_get_game_state().current_turn
+            if turn != last_turn:
+                cls._play_dice_sound()
+                last_turn = turn
+                
         current_state = server.local_get_game_state()
 
         last_clicked_index = -1
 
         def quit():
-            server.stop()
+            server.stop_server()
             GameManager.quit()
 
         def get_movable_pieces():
-            return Backgammon.from_state(current_state).get_movable_pieces()
+            return Backgammon([current_state]).get_movable_pieces()
 
         def leave_button_click():
-            server.stop()
+            server.stop_server()
             nonlocal run
             run = False
-
+        
         def save_state(state: OnlineGameState):
             nonlocal current_state
             current_state = state
+            play_dice()
 
         def done_button_click():
             save_state(server.local_done())
-            buttons_dict[GameScreenButtonKeys.DONE].toggle()
-            backgammon = Backgammon.from_state(current_state)
+            buttons_dict[GameScreenButtonKeys.done].toggle()
+            backgammon = Backgammon([current_state])
             if backgammon.is_game_over():
                 print(backgammon.get_winner())
 
@@ -416,7 +457,7 @@ class LocalClientGame(GameScreen):
             nonlocal options
             options = False
 
-        highlighted_indexes = get_movable_pieces()
+        highlighted_indexes = []
 
         buttons_dict = cls._get_buttons(
             on_leave=leave_button_click,
@@ -426,19 +467,20 @@ class LocalClientGame(GameScreen):
             graphics=graphics,
         )
 
-        all_buttons = [buttons_dict[key] for key in buttons_dict]
+        all_buttons = [button for button in buttons_dict.values()]
 
         game_buttons = [
-            buttons_dict[GameScreenButtonKeys.DONE],
-            buttons_dict[GameScreenButtonKeys.UNDO],
+            buttons_dict[GameScreenButtonKeys.done],
+            buttons_dict[GameScreenButtonKeys.undo],
         ]
         always_on_buttons = [
-            buttons_dict[GameScreenButtonKeys.LEAVE],
-            buttons_dict[GameScreenButtonKeys.OPTIONS],
+            buttons_dict[GameScreenButtonKeys.leave],
+            buttons_dict[GameScreenButtonKeys.options],
         ]
 
         def is_my_turn() -> bool:
-            return current_state.current_turn == Player.player1
+            backgammon = Backgammon([current_state])
+            return backgammon.get_current_turn() == Player.player1
 
         def on_random_click():
             nonlocal last_clicked_index
@@ -479,7 +521,7 @@ class LocalClientGame(GameScreen):
             highlighted_indexes = backgammon.get_possible_tracks(start=clicked_index)
             
 
-        server.start()
+        server.run_server()
 
         while run:
             clock.tick(config.FRAMERATE)
@@ -489,10 +531,10 @@ class LocalClientGame(GameScreen):
 
             current_state = server.local_get_game_state()
 
-            backgammon = Backgammon.from_state(current_state)
+            backgammon = Backgammon([current_state])
             
             player_colors = {
-                Player.player1: GameManager.get_setting(SettingsKeys.PIECE_COLOR),
+                Player.player1: GameManager.get_setting(SettingsKeys.piece_color),
                 Player.player2: ColorConverter.pydantic_to_pygame(
                     current_state.online_color
                 ),
@@ -522,28 +564,28 @@ class LocalClientGame(GameScreen):
                 condition=not is_screen_on_top(),
             )
 
-            buttons_dict[GameScreenButtonKeys.DONE].toggle(
+            buttons_dict[GameScreenButtonKeys.done].toggle(
                 disabled=not is_my_turn() or not backgammon.is_turn_done()
             )
-            buttons_dict[GameScreenButtonKeys.UNDO].toggle(
-                disabled=not backgammon.has_history() or not is_my_turn()
+            buttons_dict[GameScreenButtonKeys.undo].toggle(
+                disabled=current_state.history_length == 0 or not is_my_turn()
             )
 
-            cls._check_buttons(
-                screen=screen, buttons=all_buttons, condition=not is_screen_on_top()
+            cls._render_elements(
+                screen=screen, elements=all_buttons, condition=not is_screen_on_top()
             )
-
-            for event in pygame.event.get():
+            events = pygame.event.get()
+            for event in events:
                 cls._check_quit(event=event, quit=quit)
 
                 if (
                     event.type == pygame.MOUSEBUTTONDOWN
                     and not is_screen_on_top()
                 ):
-                    cls._click_buttons(buttons=always_on_buttons)
+                    cls._click_elements(elements=always_on_buttons)
 
                     if is_my_turn():
-                        cls._click_buttons(buttons=game_buttons)
+                        cls._click_elements(elements=game_buttons)
 
                     cls._move_piece(
                         graphics=graphics,
@@ -558,11 +600,11 @@ class LocalClientGame(GameScreen):
             
             if not GameManager.is_window_focused():
                 UnfocusedMenu.start(screen=screen)       
-            elif server.local_is_alone():
+            elif not server.connected:
                 close_options()
-                WaitingMenu.start(screen=screen, leave=leave_button_click)
+                WaitingMenu.start(screen=screen, close=leave_button_click, events=events)
             elif options:
-                OptionsMenu.start(screen=screen, close=close_options)
+                OptionsMenu.start(screen=screen, close=close_options, events=events)
             else:
                 pygame.mouse.set_cursor(cursor)
 
@@ -575,6 +617,9 @@ class OnlineClientGame(GameScreen):
     def start(cls, screen: Surface, clock: Clock, ip_address: str):
         run = True
         options = False
+        started = False
+        timeout = 10
+
         graphics = GraphicsManager(screen=screen)
         
         def open_options():
@@ -587,58 +632,70 @@ class OnlineClientGame(GameScreen):
 
         refresh_frequency = 500  # in milliseconds
 
-        piece_color = GameManager.get_setting(SettingsKeys.PIECE_COLOR)
-        current_state: OnlineGameState = Backgammon().get_state().to_online(
+        piece_color = GameManager.get_setting(SettingsKeys.piece_color)
+        
+        current_state: OnlineGameState = OnlineGameState(
+            **Backgammon().get_state().model_dump(),
+            history_length=0,
             online_color=ColorConverter.pygame_to_pydantic(piece_color),
             local_color=ColorConverter.pygame_to_pydantic(piece_color),
         )
-        current_state.current_turn = Player.player2
-        started = False
 
-        network = Network(
-            ip_address=ip_address,
+        network_client = NetworkClient(
+            host_ip=ip_address,
             port=config.GAME_PORT,
             buffer_size=config.NETWORK_BUFFER,
-            timeout=10,
+            timeout=timeout
         )
+        last_turn = Player.player1
 
+        def is_reconnecting():
+            return network_client.time_from_last_recieve() > timeout / 2
+        
         def quit():
             leave_button_click()
             GameManager.quit()
         
+        def play_dice():
+            nonlocal last_turn
+            turn = current_state.current_turn
+            if turn != last_turn:
+                cls._play_dice_sound()
+                last_turn = turn
+        
         def save_state(state: OnlineGameState):
             nonlocal current_state
             current_state = state
-
+            
             nonlocal started
+            
             if not started:
-                started = True
+                cls._play_dice_sound()
+            else:
+                play_dice()
+                
+            started = True
 
         def send_color():
-            network.send(
+            network_client.send(
                 data=ColorConverter.pygame_to_pydantic(piece_color),
-                callback=save_state,
+                on_recieve=save_state,
             )
-            print("Sent data to server")
 
-        network.connect(save_state)
+        network_client.connect()
 
         last_clicked_index = -1
 
         def leave_button_click():
-            network.send(data=ServerFlags.LEAVE)
-            network.close()
+            network_client.disconnect(data=ServerFlags.leave)
             nonlocal run
             run = False
 
         def done_button_click():
-            network.send(data=ServerFlags.DONE, callback=save_state)
+            network_client.send(data=ServerFlags.done, on_recieve=save_state)
 
         def undo_button_click():
-            network.send(data=ServerFlags.UNDO, callback=save_state)
-
-        def is_reconnecting() -> bool:
-            return not network.got_last_send and network.is_trying_to_connect()
+            network_client.send(data=ServerFlags.undo, on_recieve=save_state)
 
         def is_screen_on_top():
             nonlocal options
@@ -654,19 +711,20 @@ class OnlineClientGame(GameScreen):
             graphics=graphics,
         )
 
-        all_buttons = [buttons_dict[key] for key in buttons_dict]
+        all_buttons = [button for button in buttons_dict.values()]
 
         game_buttons = [
-            buttons_dict[GameScreenButtonKeys.DONE],
-            buttons_dict[GameScreenButtonKeys.UNDO],
+            buttons_dict[GameScreenButtonKeys.done],
+            buttons_dict[GameScreenButtonKeys.undo],
         ]
         always_on_buttons = [
-            buttons_dict[GameScreenButtonKeys.LEAVE],
-            buttons_dict[GameScreenButtonKeys.OPTIONS],
+            buttons_dict[GameScreenButtonKeys.leave],
+            buttons_dict[GameScreenButtonKeys.options],
         ]
 
         def is_my_turn() -> bool:
-            return current_state.current_turn == Player.player1
+            backgammon = Backgammon([current_state])
+            return backgammon.get_current_turn() == Player.player1
 
         time = pygame.time.get_ticks()
 
@@ -680,7 +738,7 @@ class OnlineClientGame(GameScreen):
                 start=last_clicked_index,
                 end=clicked_index,
             )
-            network.send(data=move, callback=save_state)
+            network_client.send(data=move, on_recieve=save_state)
             on_random_click()
 
         def on_leave_bar(clicked_index: int):
@@ -689,14 +747,14 @@ class OnlineClientGame(GameScreen):
                 start=backgammon.get_start_position(),
                 end=clicked_index,
             )
-            network.send(data=move, callback=save_state)
+            network_client.send(data=move, on_recieve=save_state)
             on_random_click()
 
         def on_bear_off(clicked_index: int):
             move = Move(
                 move_type=MoveType.bear_off, start=clicked_index, end=24
             )
-            network.send(data=move, callback=save_state)
+            network_client.send(data=move, on_recieve=save_state)
             on_random_click()
 
         def on_choose_piece(clicked_index: int):
@@ -706,7 +764,6 @@ class OnlineClientGame(GameScreen):
             nonlocal highlighted_indexes
             highlighted_indexes = backgammon.get_possible_tracks(start=clicked_index)
             
-        
         while run:
             clock.tick(config.FRAMERATE)
             screen.fill("black")
@@ -715,7 +772,7 @@ class OnlineClientGame(GameScreen):
             GraphicsManager.render_background(screen=screen)
 
             opponent_color = ColorConverter.pydantic_to_pygame(current_state.local_color)
-
+            piece_color: pygame.Color = GameManager.get_setting(SettingsKeys.piece_color)
             while piece_color == opponent_color:
                 piece_color = pygame.Color(
                     255 - opponent_color.r, 255 - opponent_color.g, 255 - opponent_color.b
@@ -724,20 +781,17 @@ class OnlineClientGame(GameScreen):
                 Player.player1: piece_color,
                 Player.player2: opponent_color,
             }
-
             graphics.render_board(
                 game_state=current_state, is_online=True, player_colors=player_colors
             )
 
             if (
                 pygame.time.get_ticks() - time > refresh_frequency
-                and started
-                and network.got_last_send
             ):
                 time = pygame.time.get_ticks()
                 send_color()
 
-            backgammon = Backgammon.from_state(current_state)
+            backgammon = Backgammon([current_state])
             if last_clicked_index == -1 and is_my_turn() and not is_screen_on_top() and started:
                 highlighted_indexes = cls._get_highlighted_tracks(
                     graphics=graphics, backgammon=backgammon
@@ -759,25 +813,25 @@ class OnlineClientGame(GameScreen):
                 condition=not is_screen_on_top(),
             )
 
-            buttons_dict[GameScreenButtonKeys.DONE].toggle(
+            buttons_dict[GameScreenButtonKeys.done].toggle(
                 disabled=not is_my_turn() or not backgammon.is_turn_done()
             )
-            buttons_dict[GameScreenButtonKeys.UNDO].toggle(
-                disabled=not backgammon.has_history() or not is_my_turn()
+            buttons_dict[GameScreenButtonKeys.undo].toggle(
+                disabled=current_state.history_length == 0 or not is_my_turn()
             )
 
-            cls._check_buttons(
-                screen=screen, buttons=all_buttons, condition=not is_screen_on_top()
+            cls._render_elements(
+                screen=screen, elements=all_buttons, condition=not is_screen_on_top()
             )
-
-            for event in pygame.event.get():
+            events = pygame.event.get()
+            for event in events:
                 cls._check_quit(event=event, quit=quit)
                 
                 if event.type == pygame.MOUSEBUTTONDOWN and not is_screen_on_top():
-                    cls._click_buttons(buttons=always_on_buttons)
+                    cls._click_elements(elements=always_on_buttons)
 
                     if is_my_turn():
-                        cls._click_buttons(buttons=game_buttons)
+                        cls._click_elements(elements=game_buttons)
 
                     cls._move_piece(
                         graphics=graphics,
@@ -790,14 +844,16 @@ class OnlineClientGame(GameScreen):
                         on_bear_off=on_bear_off,
                     )
 
-            if not GameManager.is_window_focused():
-                UnfocusedMenu.start(screen=screen)       
-            elif is_reconnecting():
-                ReconnectingMenu.start(screen=screen)
-                if not network.connected:
+            if not network_client.is_connected() and network_client.has_started():
+                LostConnectionMenu.start(screen=screen, close=leave_button_click, events=events)
+            elif not network_client.has_started() or is_reconnecting():
+                ConnectingMenu.start(screen=screen)
+                if not network_client.is_connected():
                     run = False
+            elif not GameManager.is_window_focused():
+                UnfocusedMenu.start(screen=screen)       
             elif options:
-                OptionsMenu.start(screen=screen, close=close_options)
+                OptionsMenu.start(screen=screen, close=close_options, events=events)
             else:
                 pygame.mouse.set_cursor(cursor)
 

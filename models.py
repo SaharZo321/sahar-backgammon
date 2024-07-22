@@ -1,4 +1,4 @@
-from enum import Enum
+from enum import Enum, StrEnum, auto
 from typing import Self
 from pydantic import BaseModel
 
@@ -27,28 +27,28 @@ class GameState(BaseModel):
     dice: tuple[int, int]
     moves_left: list[int]
     score: dict[Player, int]
-    history: list[Self]
+    
+    def to_online_game_state(self, online_color, local_color, history_length):
+        dump = self.model_dump()
 
-    def to_online(
-        self, online_color: PydanticColor, local_color: PydanticColor
-    ):
-        attributes = self.model_dump()
-        attributes["online_color"] = online_color
-        attributes["local_color"] = local_color
-
-        return OnlineGameState(**attributes)
+        return OnlineGameState(
+            **dump,
+            online_color=online_color,
+            local_color=local_color,
+            history_length=history_length
+        )
 
 
 class OnlineGameState(GameState):
+    history_length: int
     online_color: PydanticColor
     local_color: PydanticColor
-    history: list[GameState]
-    
 
-class MoveType(Enum):
-    leave_bar = 1
-    normal_move = 2
-    bear_off = 3
+
+class MoveType(StrEnum):
+    leave_bar = auto()
+    normal_move = auto()
+    bear_off = auto()
 
 
 class Move(BaseModel):
@@ -56,7 +56,13 @@ class Move(BaseModel):
     start: int
     end: int
 
-
 class ScoredMoves(BaseModel):
     moves: list[Move]
     score: int
+
+
+class ServerFlags(StrEnum):
+    leave = auto()
+    get_current_state = auto()
+    done = auto()
+    undo = auto()
